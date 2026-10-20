@@ -4,10 +4,14 @@
 
 Activity rings, monthly and yearly charts, your longest reads, the time of
 day you read, a wall of every cover you finished this year, a book club
-tracker and more. That's 21 cards for the
-[Bookshelf](https://github.com/AndyHazz/bookshelf.koplugin) plugin, plus a
-Dashboard that puts them together as three tabbed pages: Today, Yearly and
-Monthly. Made on, and for, a Kobo Libra Colour.
+tracker, reading trends like Apple's Fitness app, this week against last, a
+monthly challenge, library stats, a random pick from your unread books, a
+quote from your highlights and a control centre for your light. That's 31
+cards for the [Bookshelf](https://github.com/AndyHazz/bookshelf.koplugin)
+plugin, plus a Dashboard that puts them together as tabbed pages (Today,
+Yearly, Monthly, Trends and Library, and your own), and a Mini dashboard for
+the top of the home screen.
+Made on, and for, a Kobo Libra Colour.
 
 The ring designs and the idea of a reading dashboard come from
 [u/fishnoogz](https://www.reddit.com/user/fishnoogz/)'s Reddit post.
@@ -16,6 +20,19 @@ The ring designs and the idea of a reading dashboard come from
   <img src="docs/images/today.png" width="32%" alt="Today page">
   <img src="docs/images/yearly.png" width="32%" alt="Yearly page">
   <img src="docs/images/monthly.png" width="32%" alt="Monthly page">
+</p>
+
+New in 1.1: a Trends page, a Library page, pages of your own, and a Mini
+dashboard for the top of the home screen.
+
+<p align="center">
+  <img src="docs/images/trends.png" width="32%" alt="Trends page">
+  <img src="docs/images/library.png" width="32%" alt="Library page">
+  <img src="docs/images/today-custom.png" width="32%" alt="A Today page with Finish forecast, Today's timeline and the Control centre">
+</p>
+<p align="center">
+  <img src="docs/images/custom-page.png" width="32%" alt="A page of your own">
+  <img src="docs/images/mini.png" width="32%" alt="The Mini dashboard on the home screen">
 </p>
 
 The cards also work one by one, anywhere Bookshelf shows modules: in the
@@ -40,7 +57,7 @@ Bookshelf's look, including its dark theme.
 
 ## Install
 
-1. Download `reading-log-1.0.0.zip` from [Releases](../../releases) and
+1. Download `reading-log-1.1.0.zip` from [Releases](../../releases) and
    unzip it.
 2. Connect your e-reader to your computer by USB.
 3. On the e-reader, open `.adds/koreader/settings/bookshelf/`.
@@ -71,8 +88,8 @@ Your layout and settings are kept.
 
 ## Set up the Dashboard
 
-The Dashboard is the version with the Today, Yearly and Monthly tabs. It is
-meant to fill Bookshelf's full-screen view on its own.
+The Dashboard is the version with the Today, Yearly, Monthly, Trends and
+Library tabs. It is meant to fill Bookshelf's full-screen view on its own.
 
 1. Bookshelf menu > Settings > Micro modules: turn on **Full-screen button**.
 2. Tap that button, at the bottom right of the Bookshelf home screen, to open
@@ -85,7 +102,9 @@ meant to fill Bookshelf's full-screen view on its own.
    bin. The Dashboard then fills the screen.
 
 Tap the tabs at the bottom to switch pages. The Dashboard's pages can be
-changed too: long-press it > Module settings > **Pages and cards**.
+changed too: long-press it > Module settings > **Pages and cards**. You can
+add pages of your own there (up to seven tabs), and **Put the whole
+Dashboard back as it came** in the Dashboard's settings undoes every change.
 
 Optional: for a clean edge round the Dashboard, go to Bookshelf menu >
 Settings > Colors and set **Micro-module background** and **Micro-module
@@ -94,6 +113,22 @@ border** to white.
 To use single cards instead, add any `Reading Log · …` module next to
 Bookshelf's own, in the full-screen view or the home screen's top area.
 
+## The Mini dashboard
+
+For the top of the home screen (Bookshelf's top panel): one row of up to
+three small cards. As it comes it shows the book you're reading, with a small
+row of today's rings under its progress (pages, minutes and streak), then the
+Control centre.
+
+1. Bookshelf menu > Settings > Micro modules: turn on **In the top panel**.
+2. Long-press a module in the top area, tap the plus in a circle, and add
+   **Reading Log · Mini dashboard**.
+3. To change its cards: long-press it > Module settings and pick up to three
+   (Reading and today's rings, Control centre, Continue reading, Activity
+   rings, This week vs last, Week rings, Monthly challenge, Finish forecast,
+   Year goal, Today's timeline, Random pick, Quote of the day, Library
+   stats). It shows as many as fit, left to right.
+
 ## The Dashboard pages
 
 | Page | What's on it |
@@ -101,6 +136,8 @@ Bookshelf's own, in the full-screen view or the home screen's top area.
 | **Today** | Banner, Continue reading, Activity rings beside Week rings, Book club |
 | **Yearly** | Time read by month beside Longest reads (year), Books and pages, Year in covers |
 | **Monthly** | Month rings beside Month totals, Pages per day, When you read beside Longest reads (month) |
+| **Trends** | Monthly challenge beside Finish forecast, Reading trends |
+| **Library** | Library stats, Random pick beside Most-read authors, Quote of the day |
 
 On the Monthly page, the big arrows at the top step back one month at a time
 (up to twelve months), and a **Today** button brings you back. Every card on
@@ -112,9 +149,11 @@ All the modules are called `Reading Log · …` in Bookshelf's module list.
 
 ### Dashboard
 
-**Dashboard** puts the cards below together as three tabbed pages (Today,
-Yearly, Monthly) that fill the full-screen view. You can pick the cards on
-each page, their order, side by side or full width, and their height.
+**Dashboard** puts the cards below together as tabbed pages (Today, Yearly,
+Monthly, Trends, Library) that fill the full-screen view. You can pick the
+cards on each page, their order, side by side or full width, and their
+height, add pages of your own, change the order of the tabs, and put it all
+back as it came.
 
 ### Today
 
@@ -127,6 +166,7 @@ each page, their order, side by side or full width, and their height.
 | **This week** | A bar for each day this week, in pages or minutes. | Reading calendar |
 | **Year goal** | Books finished this year against your goal, and whether you're on track. Shares its goal with Bookshelf's Reading goals module. | |
 | **Book club** | This month's picks from your book club collection with your progress on each, days left in the month, and how much of the club's list you've read. | A book opens it |
+| **Today's timeline** | When you read today: each sitting as a block along the day, and a list of them with the time, the book and how long. | Reading calendar |
 
 ### Monthly
 
@@ -150,6 +190,40 @@ each page, their order, side by side or full width, and their height.
 | **Reading heatmap** | A square for each day, more strongly coloured the more you read. | Reading calendar |
 | **Recently finished** | The last few books you finished, with the date. | A cover opens the book menu |
 
+### Trends
+
+| Module | What it does | Tap |
+| --- | --- | --- |
+| **Reading trends** | Like the Trends in Apple's Fitness app: your time read, pages, reading days, session length, reading speed and books finished over the last 90 days, each against your last year, sorted into Keep it going, Worth a look (with a tip) and Needs more data. | Reading progress |
+| **Monthly challenge** | One goal for the month as a big ring: pages, minutes or reading days, picked from your last three months (or set by you), with how much each day still needs and whether you're on pace. | Reading calendar |
+| **Finish forecast** | When you'll finish the book you're reading at your recent pace ("Oct 24, in 5 days"), the other books you're in the middle of, and how many books your year is on pace for. | A book opens it |
+| **This week vs last** | Like Apple Health: "You're averaging more minutes a day this week than last week", with a bar for each week. Time read, pages or both, and this month against last or this year against last instead. | Reading calendar |
+
+### Library
+
+| Module | What it does | Tap |
+| --- | --- | --- |
+| **Library stats** | How many books you own, have read, are reading, have on hold and haven't started, as figures and one bar. | |
+| **Most-read authors** | Your top authors by books finished or by hours read, with a bar for each. | |
+| **Random pick** | A book you haven't started, new every day, week or month, or only when you tap Another. Pick from the whole library or one collection, and only the genres or authors you choose. In a series it only offers the next book: six books into eight, it picks the seventh, never the eighth. | Open opens the book, Another picks again |
+| **Quote of the day** | One of your own highlights, with the book it came from. The same daily quote as Bookshelf's own Quote of the day. | Opens the book; Another shows a different one |
+
+### Controls
+
+| Module | What it does | Tap |
+| --- | --- | --- |
+| **Control centre** | One to eight buttons, each with an icon and any action you pick (Wi-Fi, night mode, a plugin, sleep), lit up when they're on, plus brightness and warmth in ten steps. Put it on the Today page or anywhere else. | Each button runs its action; tap a step to set the light |
+
+To put the Control centre (or This week vs last) on a Dashboard page:
+long-press the Dashboard > Module settings > **Pages and cards**, pick the
+page, tap **+ Add a row**, and pick the card.
+
+### Mini dashboard
+
+| Module | What it does | Tap |
+| --- | --- | --- |
+| **Mini dashboard** | One row of small cards for the top of the home screen: the book you're reading with today's rings, and the Control centre, as it comes, or up to three you pick. | Each small card does what its big one does |
+
 ### Shelves and goals
 
 | Module | What it does | Tap |
@@ -166,6 +240,8 @@ Long-press any card > **Module settings**:
   a plugin, a KOReader action or a menu entry, picked with Bookshelf's action
   chooser. Buttons on a card keep their own job.
 - **Card colour:** plain or tinted, and which of the two accent colours leads.
+- **Dashboard pages:** add your own pages, rename or hide any page, move the
+  tabs, or put the whole Dashboard back as it came.
 - **Look and colours** (all cards at once): theme (White, Dark or Paper), two
   accent colours from twelve, how cards look on their own (matching Bookshelf
   or framed in the theme), the day the week starts on, and Diagnostics.

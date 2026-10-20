@@ -24,7 +24,7 @@ card colour. These cards each have their own colour, so they fill their cell
 with a rounded panel and draw on that instead.
 ]]
 
-local A = { VERSION = "1.0.0", NAME = "Reading Log" }
+local A = { VERSION = "1.1.0", NAME = "Reading Log" }
 
 A.dir = (debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$")) or "."
 
@@ -597,6 +597,12 @@ end
 function A.face(px, o)
     o = o or {}
     px = max(8, floor(px + 0.5))
+    if o.symbol then
+        -- icon glyphs: KOReader's bundled Nerd Font symbols
+        local Font = require("ui/font")
+        local ok, face = pcall(Font.getFace, Font, "symbols", dp(px))
+        if ok and face then return face, false end
+    end
     if o.serif then
         local Font = require("ui/font")
         local name = o.bold and "NotoSerif-Bold.ttf" or (o.italic and "NotoSerif-Italic.ttf" or "NotoSerif-Regular.ttf")

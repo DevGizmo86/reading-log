@@ -49,7 +49,7 @@ local _slots = {}
 --         to redraw when this changes, so a recheck that finds nothing new
 --         does not repaint the screen
 local function deferred(name, o, compute)
-    local s = { at = 0, value = nil, busy = false, waiters = {}, key = nil, sig = nil }
+    local s = { at = 0, value = nil, busy = false, waiters = {}, key = nil, sig = nil, sticky = o.sticky }
     _slots[name] = s
     local ttl = o.ttl or 60
     local function run()
@@ -93,7 +93,7 @@ end
 
 -- Drop everything cached (after a setting changed, or on request).
 function D.invalidate()
-    for _, s in pairs(_slots) do s.at = 0 end
+    for _, s in pairs(_slots) do if not s.sticky then s.at = 0 end end
     D._reading = nil
 end
 
@@ -430,7 +430,8 @@ local function loadStats()
         -- The recent window, and never less than this year so far (the
         -- year chart adds up every month since January).
         local t = os.date("*t")
-        local jan1 = os.time{ year = t.year, month = 1, day = 1, hour = 0, min = 0, sec = 0 }
+        -- back to January last year, for the year-on-year comparison
+        local jan1 = os.time{ year = t.year - 1, month = 1, day = 1, hour = 0, min = 0, sec = 0 }
         local since = math.min(os.time() - WINDOW_DAYS * 86400, jan1)
         -- Same shape as the statistics plugin's own per-day query (page_stat
         -- rescales pages to the book's current pagination); falls back to
@@ -786,6 +787,505 @@ function D.dayOfBook(refresh, fp)
     return max(1, n), rec.first, rec.secs
 end
 
+-- ─── reading sessions ───────────────────────────────────────────────────────
+-- A session is a run of page turns with no break longer than SESSION_GAP.
+-- One row per session (start time, seconds read) for the trends window. The
+-- grouping runs inside SQLite where window functions are available, and in
+-- Lua over the raw rows where they are not.
+
+local SESSION_GAP = 600
+local TREND_DAYS, TREND_RECENT = 365, 90
+
+local function computeSessions()
+    local l = lfs()
+    local path = statsPath()
+    if not (l and l.attributes(path, "mode") == "file") then return false end
+    local SQ3 = require("lua-ljsqlite3/init")
+    local conn = SQ3.open(path, "ro")
+    local since = os.time() - (TREND_DAYS + 2) * 86400
+    local out = {}
+    local ok, err = pcall(function()
+        conn:exec("PRAGMA busy_timeout=200;")
+        local grouped = pcall(function()
+            local stmt = conn:prepare(
+                "WITH r AS (SELECT start_time AS s, duration AS d,"
+                .. " LAG(start_time + duration) OVER (ORDER BY start_time) AS pe"
+                .. " FROM page_stat_data WHERE start_time >= ?),"
+                .. " g AS (SELECT s, d, CASE WHEN pe IS NULL OR s - pe > " .. SESSION_GAP .. " THEN 1 ELSE 0 END AS n FROM r),"
+                .. " h AS (SELECT s, d, SUM(n) OVER (ORDER BY s ROWS UNBOUNDED PRECEDING) AS id FROM g)"
+                .. " SELECT min(s), sum(d) FROM h GROUP BY id ORDER BY 1")
+            local row = stmt:reset():bind(since):step()
+            while row do
+                out[#out + 1] = { start = tonumber(row[1]) or 0, secs = tonumber(row[2]) or 0 }
+                row = stmt:step()
+            end
+            stmt:close()
+        end)
+        if not grouped then
+            out = {}
+            local stmt = conn:prepare("SELECT start_time, duration FROM page_stat_data WHERE start_time >= ? ORDER BY start_time")
+            local row = stmt:reset():bind(since):step()
+            local cur, last_end
+            while row do
+                local st, d = tonumber(row[1]) or 0, tonumber(row[2]) or 0
+                if not cur or st - last_end > SESSION_GAP then
+                    cur = { start = st, secs = 0 }
+                    out[#out + 1] = cur
+                end
+                cur.secs = cur.secs + d
+                last_end = max(last_end or 0, st + d)
+                row = stmt:step()
+            end
+            stmt:close()
+        end
+    end)
+    conn:close()
+    if not ok then error(err) end
+    return out
+end
+
+local rawSessions = deferred("sessions", {
+    ttl = 900, key = statsKey,
+    sig = function(v)
+        local last = v[#v]
+        return #v .. ":" .. (last and (last.start .. "+" .. last.secs) or "")
+    end,
+}, computeSessions)
+
+-- ─── reading trends ─────────────────────────────────────────────────────────
+-- Like the trends in Apple's Fitness app: each figure over the last 90 days
+-- against the last 365, both ending yesterday so a half-read today does not
+-- drag them down. Up (or within 3 %) = keep it going; further down = worth a
+-- look; too little history = needs more data.
+
+D.TREND_RECENT, D.TREND_DAYS = TREND_RECENT, TREND_DAYS
+
+local TREND_DEFS = {
+    { id = "time",    name = "Time read",      unit = "min/day",
+      hint = "A short session before bed would bring this back up." },
+    { id = "pages",   name = "Pages",          unit = "pages/day",
+      hint = "A few extra pages a day adds up fast." },
+    { id = "days",    name = "Reading days",   unit = "days/week",
+      hint = "Try ten minutes on the days you usually skip." },
+    { id = "session", name = "Session length", unit = "min/session",
+      hint = "Your sittings are shorter lately. One long read a week helps." },
+    { id = "speed",   name = "Reading speed",  unit = "pages/hr",
+      hint = "Slower pages can just mean a denser book." },
+    { id = "books",   name = "Books finished", unit = "books/month",
+      hint = "A couple of shorter reads would bring this back up." },
+}
+D.TREND_DEFS = TREND_DEFS
+
+--- Pure: the trends from the figures. days = { ["YYYY-MM-DD"] = {pages, secs} },
+--- first_n = day number of the first day ever read, sessions = { {start, secs} },
+--- finished = finish dates as day numbers, now = os.date("*t") for today.
+function D.trendsFrom(days, first_n, sessions, finished, now)
+    now = now or os.date("*t")
+    local today_n = A.dayNumber(now.year, now.month, now.day)
+    local span = first_n and (today_n - first_n) or 0
+    -- session day numbers, worked out once
+    local sess = {}
+    for _, ss in ipairs(sessions or {}) do
+        if (ss.secs or 0) >= 60 then
+            local t = os.date("*t", ss.start)
+            sess[#sess + 1] = { n = A.dayNumber(t.year, t.month, t.day), secs = ss.secs }
+        end
+    end
+    -- the n_days ending yesterday, less any before the first day ever read
+    local function window(n_days)
+        local w = { len = 0, pages = 0, secs = 0, read_days = 0, sessions = 0, session_secs = 0, books = 0 }
+        local lo = today_n - n_days
+        if first_n and first_n > lo then lo = first_n end
+        for k = 1, n_days do
+            local n = today_n - k
+            if n < lo then break end
+            w.len = w.len + 1
+            local key = os.date("%Y-%m-%d", os.time{ year = now.year, month = now.month, day = now.day - k, hour = 12 })
+            local rec = days[key]
+            if rec then
+                w.pages, w.secs = w.pages + (rec.pages or 0), w.secs + (rec.secs or 0)
+                if (rec.secs or 0) > 0 or (rec.pages or 0) > 0 then w.read_days = w.read_days + 1 end
+            end
+        end
+        for _, ss in ipairs(sess) do
+            if ss.n >= lo and ss.n < today_n then
+                w.sessions, w.session_secs = w.sessions + 1, w.session_secs + ss.secs
+            end
+        end
+        for _, fn in ipairs(finished or {}) do
+            if fn >= lo and fn < today_n then w.books = w.books + 1 end
+        end
+        return w
+    end
+    local r, b = window(TREND_RECENT), window(TREND_DAYS)
+    local enough = span >= 120 and b.read_days >= 30
+    local function val(w, id)
+        if w.len <= 0 then return nil end
+        if id == "time" then return w.secs / 60 / w.len end
+        if id == "pages" then return w.pages / w.len end
+        if id == "days" then return w.read_days / (w.len / 7) end
+        if id == "session" then return w.sessions > 0 and (w.session_secs / w.sessions / 60) or nil end
+        if id == "speed" then return w.secs > 0 and (w.pages / (w.secs / 3600)) or nil end
+        if id == "books" then return w.books / (w.len / 30.44) end
+    end
+    local function ready(id)
+        if not enough then return false end
+        if id == "session" then return r.sessions >= 5 and b.sessions >= 10 end
+        if id == "speed" then return r.secs >= 3 * 3600 and b.secs >= 6 * 3600 end
+        if id == "books" then return b.books >= 3 end
+        return true
+    end
+    local out = {}
+    for _, def in ipairs(TREND_DEFS) do
+        local rv, bv = val(r, def.id), val(b, def.id)
+        local item = { id = def.id, name = def.name, unit = def.unit, hint = def.hint, recent = rv, base = bv }
+        if not ready(def.id) or not rv or not bv or bv <= 0 then
+            item.group = "more"
+        else
+            item.ratio = rv / bv
+            item.group = item.ratio >= 0.97 and "keep" or "look"
+        end
+        out[#out + 1] = item
+    end
+    return out, { history = span, enough = enough }
+end
+
+--- The trends (see D.trendsFrom), nil while loading, false without a
+--- statistics database.
+function D.trends(refresh)
+    local raw = rawStats(refresh)
+    if raw == false then return false end
+    local sessions = rawSessions(refresh)
+    local yr = D.year(refresh)
+    if not raw or sessions == nil or not yr then return nil end
+    local finished = {}
+    for _, l in pairs(yr.recent or {}) do
+        for _, it in ipairs(l) do
+            if it.year and it.month then finished[#finished + 1] = A.dayNumber(it.year, it.month, it.day or 1) end
+        end
+    end
+    return D.trendsFrom(raw.days, raw.nums[1], sessions or {}, finished, os.date("*t"))
+end
+
+-- ─── this week against last week ────────────────────────────────────────────
+-- Like Apple Health's highlights: your average a day so far this week (month,
+-- year) against the whole of last week (month, year). A today with no reading
+-- yet is left out, so the morning does not drag the average down.
+
+local PERIOD_WORDS = {
+    week = { "this week", "last week" }, month = { "this month", "last month" }, year = { "this year", "last year" },
+}
+
+--- Pure. days = { ["YYYY-MM-DD"] = {pages, secs} }, period "week"|"month"|"year",
+--- metric "time"|"pages", now = os.date("*t"), ws = first weekday (1 = Sunday),
+--- first_n = day number of the first day ever read (or nil).
+function D.compareFrom(days, period, metric, now, ws, first_n)
+    now = now or os.date("*t")
+    now = os.date("*t", os.time{ year = now.year, month = now.month, day = now.day, hour = 12 }) -- fills in the weekday
+    ws = ws or 2
+    if not PERIOD_WORDS[period] then period = "week" end
+    if metric ~= "pages" then metric = "time" end
+    local today_n = A.dayNumber(now.year, now.month, now.day)
+    local function at(k) -- the date k days before today
+        return os.date("%Y-%m-%d", os.time{ year = now.year, month = now.month, day = now.day - k, hour = 12 })
+    end
+    local function value(rec)
+        if not rec then return 0 end
+        return metric == "pages" and (rec.pages or 0) or (rec.secs or 0) / 60
+    end
+    -- the current period: k = 0 (today) back to `back`
+    local back, last_from, last_len
+    if period == "week" then
+        back = (now.wday - ws) % 7
+        last_from, last_len = back + 1, 7
+    elseif period == "month" then
+        back = now.day - 1
+        local prev_len = tonumber(os.date("%d", os.time{ year = now.year, month = now.month, day = 0, hour = 12 })) or 30
+        last_from, last_len = back + 1, prev_len
+    else
+        back = (tonumber(os.date("%j", os.time{ year = now.year, month = now.month, day = now.day, hour = 12 })) or 1) - 1
+        local prev_len = tonumber(os.date("%j", os.time{ year = now.year - 1, month = 12, day = 31, hour = 12 })) or 365
+        last_from, last_len = back + 1, prev_len
+    end
+    -- the days gone by; today joins them once it has lifted the average (a
+    -- half-read today never drags it down)
+    local sum, n = 0, 0
+    for k = back, 1, -1 do
+        sum, n = sum + value(days[at(k)]), n + 1
+    end
+    local today_v = value(days[at(0)])
+    if n > 0 and today_v > sum / n then
+        sum, n = sum + today_v, n + 1
+    end
+    local lsum, ln = 0, 0
+    for k = last_from, last_from + last_len - 1 do
+        if not first_n or today_n - k >= first_n then
+            lsum, ln = lsum + value(days[at(k)]), ln + 1
+        end
+    end
+    local last = ln > 0 and lsum / ln or nil
+    -- the first day of the period: today counts once it beats last time's average
+    if n == 0 and last and today_v > last then sum, n = today_v, 1 end
+    local this = n > 0 and sum / n or nil
+    local words = PERIOD_WORDS[period]
+    local unit = metric == "pages" and "pages" or "minutes"
+    local sentence, dir
+    if not this then
+        sentence = "This " .. period .. " has only just started."
+    elseif not last then
+        sentence = "Nothing to compare with " .. words[2] .. " yet."
+    elseif last == 0 and this == 0 then
+        sentence = "Nothing read " .. words[1] .. " or " .. words[2] .. " yet."
+    elseif this > last * 1.03 then
+        dir = "up"
+        sentence = "You're averaging more " .. unit .. " a day " .. words[1] .. " than " .. words[2] .. "."
+    elseif this < last * 0.97 then
+        dir = "down"
+        sentence = "You're averaging fewer " .. unit .. " a day " .. words[1] .. " than " .. words[2] .. "."
+    else
+        dir = "same"
+        sentence = "You're averaging about as many " .. unit .. " a day " .. words[1] .. " as " .. words[2] .. "."
+    end
+    -- what to call the two bars
+    local label_this, label_last
+    if period == "year" then
+        label_this, label_last = tostring(now.year), tostring(now.year - 1)
+    elseif period == "month" then
+        label_this = A.date("%B", os.time{ year = now.year, month = now.month, day = 1, hour = 12 })
+        label_last = A.date("%B", os.time{ year = now.year, month = now.month - 1, day = 1, hour = 12 })
+    else
+        label_this, label_last = "This week", "Last week"
+    end
+    return { period = period, metric = metric, this = this, last = last, dir = dir, sentence = sentence,
+        label_this = label_this, label_last = label_last, days_this = n, days_last = ln }
+end
+
+--- The comparison from the statistics, nil while loading, false without them.
+function D.compare(refresh, period, metric)
+    local raw = rawStats(refresh)
+    if not raw then return raw end
+    return D.compareFrom(raw.days, period, metric, os.date("*t"), D.weekStart(), raw.nums[1])
+end
+
+-- ─── monthly challenge ──────────────────────────────────────────────────────
+-- One goal for the month. As it comes it is picked like Apple's monthly
+-- challenge: the measure takes turns month by month (pages, then minutes,
+-- then reading days) and the target is a tenth above your daily rate over
+-- the last three months, for this month's length. Either can be set by hand.
+
+D.CHALLENGE_METRICS = { "pages", "minutes", "days" }
+
+local function monthTotals(days, y, m)
+    local n_days = tonumber(os.date("%d", os.time{ year = y, month = m + 1, day = 0, hour = 12 })) or 30
+    local tot = { pages = 0, minutes = 0, days = 0, n_days = n_days, by_day = {} }
+    local prefix = ymKey(y, m) .. "-"
+    for d = 1, n_days do
+        local rec = days[prefix .. string.format("%02d", d)]
+        local day = { pages = 0, minutes = 0, days = 0 }
+        if rec then
+            day.pages, day.minutes = rec.pages or 0, (rec.secs or 0) / 60
+            if (rec.secs or 0) > 0 or (rec.pages or 0) > 0 then day.days = 1 end
+            tot.pages = tot.pages + day.pages
+            tot.minutes = tot.minutes + day.minutes
+            tot.days = tot.days + day.days
+        end
+        tot.by_day[d] = day
+    end
+    return tot
+end
+
+local function roundTarget(metric, v, n_days)
+    if metric == "days" then return A.clamp(math.ceil(v), 1, n_days) end
+    if metric == "minutes" then
+        local step = v >= 600 and 60 or 30
+        return max(step, floor(v / step + 0.5) * step)
+    end
+    local step = v >= 2000 and 100 or 50
+    return max(step, floor(v / step + 0.5) * step)
+end
+
+local CHALLENGE_DEFAULT = { pages = 300, minutes = 600, days = 12 }
+
+--- Pure: this month's challenge. metric_pref "auto" or one of the metrics,
+--- target_pref a number or nil (auto). now = os.date("*t") for this month.
+function D.challengeFrom(days, metric_pref, target_pref, now)
+    now = now or os.date("*t")
+    local y, m = now.year, now.month
+    local metric = metric_pref
+    local auto_metric = not (metric == "pages" or metric == "minutes" or metric == "days")
+    if auto_metric then metric = D.CHALLENGE_METRICS[(m - 1) % 3 + 1] end
+    local cur = monthTotals(days or {}, y, m)
+    local n_days = cur.n_days
+    -- the last three whole months
+    local sum, len = 0, 0
+    for back = 1, 3 do
+        local t = os.date("*t", os.time{ year = y, month = m - back, day = 1, hour = 12 })
+        local mt = monthTotals(days or {}, t.year, t.month)
+        sum, len = sum + mt[metric], len + mt.n_days
+    end
+    local target = tonumber(target_pref)
+    local auto_target = not (target and target > 0)
+    if auto_target then
+        if sum > 0 and len > 0 then
+            target = roundTarget(metric, sum / len * n_days * 1.1, n_days)
+        else
+            target = CHALLENGE_DEFAULT[metric]
+        end
+    end
+    target = max(1, floor(target + 0.5))
+    if metric == "days" then target = min(target, n_days) end
+    local done = metric == "minutes" and floor(cur.minutes + 0.5) or cur[metric]
+    local day = min(now.day, n_days)
+    local left_days = n_days - day
+    local remaining = max(0, target - done)
+    -- what each day still to come (today counts) needs to bring
+    local per_day = remaining > 0 and (remaining / max(1, left_days + 1)) or 0
+    -- the running total, day by day, up to today
+    local series, run = {}, 0
+    for d = 1, day do
+        run = run + (cur.by_day[d] and cur.by_day[d][metric] or 0)
+        series[d] = run
+    end
+    return {
+        series = series,
+        metric = metric, target = target, done = done, frac = done / target,
+        n_days = n_days, day = day, left_days = left_days, remaining = remaining,
+        per_day = per_day, complete = done >= target,
+        on_pace = done >= target * day / n_days,
+        auto_metric = auto_metric, auto_target = auto_target, year = y, month = m,
+    }
+end
+
+--- This month's challenge, nil while loading, false without statistics.
+function D.challenge(refresh, metric_pref, target_pref)
+    local raw = rawStats(refresh)
+    if not raw then return raw end
+    return D.challengeFrom(raw.days, metric_pref, target_pref)
+end
+
+-- ─── finish forecast ────────────────────────────────────────────────────────
+-- When each book in progress will be done at the rate you have been reading
+-- lately: its time left (Bookshelf works that out from your speed in that
+-- book) over your average reading time a day across the last 30 days, or, for
+-- a book with no time left on record, its pages left over your pages a day.
+
+local FORECAST_DAYS = 30
+
+--- Pure: the forecast for one book. avg = { secs = per day, pages = per day }.
+function D.forecastFor(item, avg, now_t)
+    now_t = now_t or os.time()
+    local days
+    if tonumber(item.left_min) and avg.secs > 0 then
+        days = item.left_min * 60 / avg.secs
+    elseif tonumber(item.pages) and avg.pages > 0 then
+        days = item.pages * (1 - (item.pct or 0)) / avg.pages
+    end
+    if not days then return nil end
+    days = max(0, math.ceil(days - 1e-9))
+    local t = os.date("*t", now_t)
+    local when = os.time{ year = t.year, month = t.month, day = t.day + days, hour = 12 }
+    return { days = days, when = when }
+end
+
+--- Your reading a day over the last 30 days (today included).
+function D.recentAverage(st)
+    local out = { secs = 0, pages = 0, days = FORECAST_DAYS }
+    if type(st) ~= "table" or type(st.days) ~= "table" then return out end
+    local t = os.date("*t")
+    for i = 0, FORECAST_DAYS - 1 do
+        local rec = st.days[os.date("%Y-%m-%d", os.time{ year = t.year, month = t.month, day = t.day - i, hour = 12 })]
+        if rec then out.secs, out.pages = out.secs + (rec.secs or 0), out.pages + (rec.pages or 0) end
+    end
+    out.secs, out.pages = out.secs / FORECAST_DAYS, out.pages / FORECAST_DAYS
+    return out
+end
+
+--- Books finished this year so far, and where the year is heading at that rate.
+function D.yearPace(yr)
+    if type(yr) ~= "table" then return nil end
+    local t = os.date("*t")
+    local done = (yr.total or 0) + (select(2, D.yearGoal()) or 0)
+    local days_in_year = tonumber(os.date("%j", os.time{ year = t.year, month = 12, day = 31, hour = 12 })) or 365
+    local doy = tonumber(os.date("%j")) or 1
+    local projected = doy >= 14 and floor(done / doy * days_in_year + 0.5) or nil
+    return { done = done, projected = projected, goal = (D.yearGoal()) }
+end
+
+-- ─── the front light ────────────────────────────────────────────────────────
+-- Brightness and warmth as 0..100, read from and set through KOReader's own
+-- power device, the way its front light dialog does it.
+
+local function powerd()
+    local ok, Device = pcall(require, "device")
+    if not (ok and Device) then return nil end
+    local okp, pd = pcall(Device.getPowerDevice, Device)
+    return okp and pd or nil, Device
+end
+
+function D.light()
+    local pd, Device = powerd()
+    local out = { has_light = false, has_warmth = false, level = 0, warmth = 0 }
+    if not (pd and Device) then return out end
+    local ok_fl, has = pcall(Device.hasFrontlight, Device)
+    out.has_light = ok_fl and has and true or false
+    if out.has_light then
+        local lo, hi = tonumber(pd.fl_min) or 0, tonumber(pd.fl_max) or 100
+        local cur = tonumber((pcall(pd.frontlightIntensity, pd)) and pd:frontlightIntensity()) or 0
+        out.level = hi > lo and A.clamp(floor((cur - lo) / (hi - lo) * 100 + 0.5), 0, 100) or 0
+        out.on = (pcall(pd.isFrontlightOn, pd)) and pd:isFrontlightOn() or cur > lo
+    end
+    local ok_nl, nl = pcall(Device.hasNaturalLight, Device)
+    out.has_warmth = ok_nl and nl and true or false
+    if out.has_warmth then
+        out.warmth = tonumber((pcall(pd.frontlightWarmth, pd)) and pd:frontlightWarmth()) or 0
+    end
+    return out
+end
+
+--- Set the brightness to pct (1..100) of the light's range.
+function D.setLight(pct)
+    local pd = powerd()
+    if not pd then return false end
+    local lo, hi = tonumber(pd.fl_min) or 0, tonumber(pd.fl_max) or 100
+    local v = lo + floor((hi - lo) * A.clamp(pct, 1, 100) / 100 + 0.5)
+    v = A.clamp(max(v, lo + 1), lo, hi)
+    pcall(pd.setIntensity, pd, v)
+    if (pcall(pd.isFrontlightOff, pd)) and pd:isFrontlightOff() then pcall(pd.turnOnFrontlight, pd) end
+    pcall(pd.updateResumeFrontlightState, pd)
+    return true
+end
+
+--- Set the warmth to pct (0..100).
+function D.setWarmth(pct)
+    local pd = powerd()
+    if not pd then return false end
+    pcall(pd.setWarmth, pd, A.clamp(floor(pct + 0.5), 0, 100))
+    return true
+end
+
+--- Whether a toggle action is on right now: true / false, or nil when it is
+--- not a toggle we can read.
+function D.toggleState(entry)
+    local action = type(entry) == "table" and type(entry.action) == "table" and entry.action or nil
+    if not action then return nil end
+    local id = next(action)
+    if id == "toggle_wifi" or id == "wifi_on" then
+        local ok, NM = pcall(require, "ui/network/manager")
+        if ok and NM and NM.isWifiOn then
+            local ok2, on = pcall(NM.isWifiOn, NM)
+            if ok2 then return on and true or false end
+        end
+        return nil
+    end
+    if id == "night_mode" or id == "set_night_mode" then
+        return G_reader_settings and G_reader_settings:isTrue("night_mode") or false
+    end
+    if id == "toggle_frontlight" then
+        return D.light().on and true or false
+    end
+    return nil
+end
+
 -- ─── collections ─────────────────────────────────────────────────────────────
 
 function D.collections()
@@ -824,6 +1324,437 @@ function D.inCollection(name, fp)
     local ok, RC = pcall(require, "readcollection")
     if not (ok and RC and type(RC.coll) == "table" and type(RC.coll[name]) == "table") then return false end
     return RC.coll[name][fp] ~= nil
+end
+
+-- ─── the library ─────────────────────────────────────────────────────────────
+-- Every book Bookshelf's library walk finds (home folder, to its walk depth),
+-- with its status. Titles, authors, series and genres come from Bookshelf's
+-- shared light records (one batched read it keeps for its own chips), the
+-- status from each book's sidecar through Bookshelf's progress cache. A book
+-- with no sidecar has never been opened, which costs one file check.
+
+local function statusFrom(fp)
+    local pct, status, _, opened = D.progress(fp)
+    if status == "reading" or status == "finished" or status == "on_hold" then return status end
+    pct = tonumber(pct)
+    if opened and pct and pct > 0 then return pct >= 0.995 and "finished" or "reading" end
+    return "unread"
+end
+
+-- Kept per book with its sidecar's modification time: a sidecar only changes
+-- when its book is opened, so a recount re-reads only the books opened since.
+local _status_memo = {}
+local function bookStatus(fp)
+    local ok, DocSettings = pcall(require, "docsettings")
+    local l = lfs()
+    if not (ok and DocSettings and DocSettings.findSidecarFile and l) then return statusFrom(fp) end
+    local ok_f, sidecar = pcall(DocSettings.findSidecarFile, DocSettings, fp)
+    if not ok_f then return statusFrom(fp) end
+    if not sidecar then
+        _status_memo[fp] = nil
+        return "unread"
+    end
+    local mtime = l.attributes(sidecar, "modification") or 0
+    local m = _status_memo[fp]
+    if m and m.mtime == mtime then return m.status end
+    local st = statusFrom(fp)
+    _status_memo[fp] = { mtime = mtime, status = st }
+    return st
+end
+D.bookStatus = bookStatus
+
+-- "King, Stephen" -> "Stephen King"; anything else as it is.
+local function authorName(a)
+    if type(a) ~= "string" then return nil end
+    a = a:match("^%s*(.-)%s*$")
+    if a == "" then return nil end
+    local last, first = a:match("^([^,]+),%s*([^,]+)$")
+    if last and first then a = first .. " " .. last end
+    return a
+end
+D.authorName = authorName
+
+-- One book as the library cards use it, from Bookshelf's light record (or
+-- just the file name when Bookshelf has none for it).
+local function libBook(fp, meta, status)
+    local name = (fp:match("([^/]+)$") or fp):gsub("%.[^.]+$", "")
+    local authors = {}
+    if type(meta) == "table" then
+        local list = type(meta.authors) == "table" and meta.authors or { meta.author }
+        for _, a in ipairs(list) do
+            local n = authorName(a)
+            if n then authors[#authors + 1] = n end
+        end
+    end
+    local genres = {}
+    if type(meta) == "table" and type(meta.genres) == "table" then
+        for _, g in ipairs(meta.genres) do
+            if type(g) == "string" and g:match("%S") then genres[#genres + 1] = g:match("^%s*(.-)%s*$") end
+        end
+    end
+    local series = type(meta) == "table" and type(meta.series_name) == "string" and meta.series_name ~= "" and meta.series_name or nil
+    return {
+        fp = fp, status = status,
+        title = (type(meta) == "table" and type(meta.title) == "string" and meta.title ~= "" and meta.title) or name,
+        authors = authors, genres = genres, series = series,
+        num = series and tonumber(type(meta) == "table" and meta.series_num) or nil,
+    }
+end
+D.libBook = libBook
+
+local function computeLibrary()
+    local Repo = repo()
+    if not (Repo and Repo.getAllFilepaths) then return false end
+    local ok, paths = pcall(Repo.getAllFilepaths)
+    if not ok or type(paths) ~= "table" then return false end
+    local books, counts = {}, { unread = 0, reading = 0, on_hold = 0, finished = 0 }
+    for _, fp in ipairs(paths) do
+        if type(fp) == "string" then
+            local meta
+            if Repo.lightMetaFor then
+                local ok_m, m = pcall(Repo.lightMetaFor, fp)
+                if ok_m then meta = m end
+            end
+            local st = bookStatus(fp)
+            counts[st] = counts[st] + 1
+            books[#books + 1] = libBook(fp, meta, st)
+        end
+    end
+    return { books = books, counts = counts, total = #books }
+end
+
+-- Recounted at most every 15 minutes, and only while a card that needs it is
+-- on screen; a settings change does not trigger a recount.
+D.library = deferred("library", {
+    ttl = 900, sticky = true,
+    sig = function(v)
+        local c = v.counts
+        return table.concat({ v.total, c.unread, c.reading, c.on_hold, c.finished }, ",")
+    end,
+}, computeLibrary)
+
+-- Count the library again on the next look.
+function D.recountLibrary()
+    if _slots.library then _slots.library.at = 0 end
+end
+
+-- Distinct genres or authors in the library, most books first: { {name, n} }.
+function D.libraryValues(lib, field)
+    local tally, order = {}, {}
+    for _, b in ipairs(lib and lib.books or {}) do
+        local seen = {}
+        for _, v in ipairs(b[field] or {}) do
+            local k = v:lower()
+            if not seen[k] then
+                seen[k] = true
+                if not tally[k] then tally[k] = { name = v, n = 0 }; order[#order + 1] = k end
+                tally[k].n = tally[k].n + 1
+            end
+        end
+    end
+    local out = {}
+    for _, k in ipairs(order) do out[#out + 1] = tally[k] end
+    table.sort(out, function(a, b)
+        if a.n ~= b.n then return a.n > b.n end
+        return a.name:lower() < b.name:lower()
+    end)
+    return out
+end
+
+-- ─── most-read authors ───────────────────────────────────────────────────────
+-- By books: finished books in the library, per author. By time: hours in the
+-- statistics, per author (every book KOReader has timed, kept or not).
+
+function D.authorsByBooks(lib)
+    local tally, order = {}, {}
+    for _, b in ipairs(lib and lib.books or {}) do
+        if b.status == "finished" then
+            for _, a in ipairs(b.authors) do
+                local k = a:lower()
+                if not tally[k] then tally[k] = { name = a, n = 0, books = 0 }; order[#order + 1] = k end
+                tally[k].n = tally[k].n + 1
+                tally[k].books = tally[k].books + 1
+            end
+        end
+    end
+    local out = {}
+    for _, k in ipairs(order) do out[#out + 1] = tally[k] end
+    table.sort(out, function(a, b)
+        if a.n ~= b.n then return a.n > b.n end
+        return a.name:lower() < b.name:lower()
+    end)
+    return out
+end
+
+local function computeAuthorTime()
+    local l = lfs()
+    local path = statsPath()
+    if not (l and l.attributes(path, "mode") == "file") then return false end
+    local SQ3 = require("lua-ljsqlite3/init")
+    local conn = SQ3.open(path, "ro")
+    local tally, order = {}, {}
+    local ok, err = pcall(function()
+        conn:exec("PRAGMA busy_timeout=200;")
+        local stmt = conn:prepare("SELECT authors, total_read_time FROM book WHERE total_read_time > 0")
+        local row = stmt:step()
+        while row do
+            local secs = tonumber(row[2]) or 0
+            local raw = type(row[1]) == "string" and row[1] or ""
+            local names, seen = {}, {}
+            for part in raw:gmatch("[^\n]+") do
+                local n = authorName(part)
+                if n and not seen[n:lower()] then seen[n:lower()] = true; names[#names + 1] = n end
+            end
+            for _, n in ipairs(names) do
+                local k = n:lower()
+                if not tally[k] then tally[k] = { name = n, n = 0, books = 0 }; order[#order + 1] = k end
+                tally[k].n = tally[k].n + secs
+                tally[k].books = tally[k].books + 1
+            end
+            row = stmt:step()
+        end
+        stmt:close()
+    end)
+    conn:close()
+    if not ok then error(err) end
+    local out = {}
+    for _, k in ipairs(order) do out[#out + 1] = tally[k] end
+    table.sort(out, function(a, b)
+        if a.n ~= b.n then return a.n > b.n end
+        return a.name:lower() < b.name:lower()
+    end)
+    return out
+end
+
+D.authorTime = deferred("author_time", {
+    ttl = 900, key = statsKey,
+    sig = function(v) return #v .. ":" .. (v[1] and (v[1].name .. v[1].n) or "") end,
+}, computeAuthorTime)
+
+--- The most-read authors: { {name, n, books} } with n = books finished or
+--- seconds read. nil while loading, false without the data.
+function D.authors(refresh, by)
+    if by == "time" then return D.authorTime(refresh) end
+    local lib = D.library(refresh)
+    if not lib then return lib end
+    return D.authorsByBooks(lib)
+end
+
+-- ─── random pick ─────────────────────────────────────────────────────────────
+-- A book you haven't started, from the whole library or one collection, and
+-- only the genres or authors you choose. A book in a series stands in for the
+-- series, and the series offers only its next book: the first one in order
+-- that isn't finished, and only if that one isn't started yet either (if
+-- you're in the middle of book 7, the series sits this one out).
+
+D.PICK_EVERY = { "day", "week", "month", "tap" }
+
+local function lowerSet(list)
+    if type(list) ~= "table" or #list == 0 then return nil end
+    local set = {}
+    for _, v in ipairs(list) do if type(v) == "string" then set[v:lower()] = true end end
+    return set
+end
+
+local function anyIn(list, set)
+    for _, v in ipairs(list or {}) do if set[v:lower()] then return true end end
+    return false
+end
+
+--- Pure: the books the pick can land on, sorted by file.
+--- o = { coll = { [fp] = true } or nil, genres = { names } or nil, authors = { names } or nil }
+function D.pickCandidates(books, o)
+    o = o or {}
+    local genres, authors = lowerSet(o.genres), lowerSet(o.authors)
+    local series = {}
+    for _, b in ipairs(books) do
+        if b.series then
+            local k = b.series:lower()
+            series[k] = series[k] or {}
+            table.insert(series[k], b)
+        end
+    end
+    for _, list in pairs(series) do
+        table.sort(list, function(a, b)
+            if (a.num ~= nil) ~= (b.num ~= nil) then return a.num ~= nil end
+            if a.num and b.num and a.num ~= b.num then return a.num < b.num end
+            return a.title:lower() < b.title:lower()
+        end)
+    end
+    local out, seen = {}, {}
+    for _, b in ipairs(books) do
+        if b.status == "unread"
+                and (not o.coll or o.coll[b.fp])
+                and (not genres or anyIn(b.genres, genres))
+                and (not authors or anyIn(b.authors, authors)) then
+            local pick = b
+            if b.series then
+                pick = nil
+                for _, s in ipairs(series[b.series:lower()]) do
+                    if s.status ~= "finished" then
+                        if s.status == "unread" then pick = s end
+                        break
+                    end
+                end
+            end
+            if pick and not seen[pick.fp] then
+                seen[pick.fp] = true
+                out[#out + 1] = pick
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.fp < b.fp end)
+    return out
+end
+
+-- Where in the series a book sits: "Book 7 of 8", or nil.
+function D.seriesPlace(books, b)
+    if not (b and b.series) then return nil end
+    local n, top = 0, 0
+    for _, o in ipairs(books) do
+        if o.series and o.series:lower() == b.series:lower() then
+            n = n + 1
+            if o.num and o.num > top then top = o.num end
+        end
+    end
+    return b.num, max(n, floor(top))
+end
+
+-- The stretch of time one pick lasts: "2026-10-19", "w2026-10-19" (the
+-- week's first day), "2026-10" or "tap".
+function D.pickPeriod(every, now)
+    now = now or os.time()
+    if every == "tap" then return "tap" end
+    if every == "month" then return os.date("%Y-%m", now) end
+    if every == "week" then
+        local t = os.date("*t", now)
+        local back = (t.wday - D.weekStart()) % 7
+        return "w" .. os.date("%Y-%m-%d", os.time{ year = t.year, month = t.month, day = t.day - back, hour = 12 })
+    end
+    return os.date("%Y-%m-%d", now)
+end
+
+local function hash(str)
+    local h = 5381
+    for i = 1, #str do h = (h * 33 + str:byte(i)) % 2147483647 end
+    return h
+end
+
+--- Pure: which candidate a period lands on. n = how many times "Another"
+--- was tapped this period; skip = a file to step over when there is a choice.
+function D.pickAt(cands, period, n, skip)
+    if #cands == 0 then return nil end
+    local i = (hash(period .. "#" .. tostring(n or 0)) % #cands) + 1
+    if skip and #cands > 1 and cands[i].fp == skip then i = i % #cands + 1 end
+    return cands[i]
+end
+
+-- ─── today's reading, sitting by sitting ─────────────────────────────────────
+
+--- Pure: rows = { {start, secs, book, title} } in time order -> sittings
+--- { {start, stop, secs, title} } (a break of more than ten minutes ends one;
+--- a sitting is named after the book it spent longest on).
+function D.timelineFrom(rows, gap)
+    gap = gap or SESSION_GAP
+    local out, cur, last_end = {}, nil, nil
+    for _, r in ipairs(rows) do
+        if not cur or r.start - last_end > gap then
+            cur = { start = r.start, stop = r.start, secs = 0, by_book = {} }
+            out[#out + 1] = cur
+        end
+        cur.secs = cur.secs + r.secs
+        cur.stop = max(cur.stop, r.start + r.secs)
+        local k = r.book or 0
+        local e = cur.by_book[k]
+        if not e then e = { secs = 0, title = r.title }; cur.by_book[k] = e end
+        e.secs = e.secs + r.secs
+        last_end = max(last_end or 0, r.start + r.secs)
+    end
+    for _, s in ipairs(out) do
+        local best
+        for k, e in pairs(s.by_book) do
+            if not best or e.secs > best.secs or (e.secs == best.secs and tostring(k) < tostring(best.k)) then
+                best = { secs = e.secs, title = e.title, k = k }
+            end
+        end
+        s.title = best and best.title or nil
+        s.book = best and best.k or nil
+        s.by_book = nil
+    end
+    return out
+end
+
+local function computeToday()
+    local l = lfs()
+    local path = statsPath()
+    if not (l and l.attributes(path, "mode") == "file") then return false end
+    local SQ3 = require("lua-ljsqlite3/init")
+    local conn = SQ3.open(path, "ro")
+    local t = os.date("*t")
+    local since = os.time{ year = t.year, month = t.month, day = t.day, hour = 0, min = 0, sec = 0 }
+    local rows = {}
+    local ok, err = pcall(function()
+        conn:exec("PRAGMA busy_timeout=200;")
+        local stmt = conn:prepare("SELECT p.start_time, p.duration, p.id_book, b.title FROM page_stat_data p"
+            .. " LEFT JOIN book b ON b.id = p.id_book WHERE p.start_time >= ? ORDER BY p.start_time")
+        local row = stmt:reset():bind(since):step()
+        while row do
+            rows[#rows + 1] = { start = tonumber(row[1]) or 0, secs = tonumber(row[2]) or 0,
+                book = tonumber(row[3]), title = type(row[4]) == "string" and row[4] or nil }
+            row = stmt:step()
+        end
+        stmt:close()
+    end)
+    conn:close()
+    if not ok then error(err) end
+    return { day = os.date("%Y-%m-%d"), since = since, sittings = D.timelineFrom(rows) }
+end
+
+local rawToday = deferred("today", {
+    ttl = 120, key = statsKey,
+    sig = function(v)
+        local last = v.sittings[#v.sittings]
+        return v.day .. #v.sittings .. ":" .. (last and (last.start .. "+" .. last.secs) or "")
+    end,
+}, computeToday)
+
+--- Today's sittings, nil while loading, false without statistics.
+function D.today(refresh)
+    local v = rawToday(refresh)
+    if v and v.day ~= os.date("%Y-%m-%d") then return { day = os.date("%Y-%m-%d"), sittings = {} } end
+    return v
+end
+
+-- ─── quote of the day ────────────────────────────────────────────────────────
+-- Bookshelf's own quote provider: one highlight a day from your books, the
+-- same one its Quote of the day card and %quote token show. It keeps a count
+-- of each book's highlights and opens only the sidecar it picks from.
+
+local function quotes()
+    local ok, Q = pcall(require, "lib/bookshelf_quotes")
+    if ok and type(Q) == "table" and Q.ofTheDay then return Q end
+    return nil
+end
+D.hasQuotes = function() return quotes() ~= nil end
+
+local quoteSlot = deferred("quote", {
+    ttl = 600,
+    sig = function(v) return v and tostring(v.text) .. tostring(v.filepath) or "" end,
+}, function()
+    local Q = quotes()
+    if not Q then return false end
+    return Q.ofTheDay() or false
+end)
+
+function D.quote(refresh, sync) return quoteSlot(refresh, sync) end
+
+-- Step to another quote (and show it straight away).
+function D.nextQuote()
+    local Q = quotes()
+    if not Q then return end
+    if Q.reroll then pcall(Q.reroll) end
+    _slots.quote.at = 0
+    quoteSlot(nil, true)
 end
 
 -- ─── covers ──────────────────────────────────────────────────────────────────

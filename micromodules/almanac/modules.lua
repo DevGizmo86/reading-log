@@ -484,6 +484,10 @@ A.DASH_PAGES = {
       rows = { { "year_time", "longest_year" }, { "year_chart" }, { "year_covers" } } },
     { id = "monthly", label = "Monthly", heading = true, kicker = "month",
       rows = { { "month_rings", "month_totals" }, { "month_chart" }, { "when_read", "longest_month" } } },
+    { id = "trends", label = "Trends", heading = true, kicker = "streak",
+      rows = { { "challenge", "forecast" }, { "trends" } } },
+    { id = "library", label = "Library", heading = true, kicker = "library",
+      rows = { { "library" }, { "pick", "authors" }, { "quote" } } },
 }
 
 -- How tall a card wants to be, as a share of the page. A row takes the larger
@@ -494,16 +498,54 @@ A.DASH_WEIGHT = {
     heatmap = 0.25, year_chart = 0.30, finished = 0.355, deadline = 0.27,
     longest_year = 0.36, longest_month = 0.36,
     year_time = 0.36, month_totals = 0.40, month_chart = 0.30, when_read = 0.36,
+    challenge = 0.33, forecast = 0.33, trends = 0.62, control = 0.24, compare = 0.34,
+    library = 0.27, authors = 0.37, pick = 0.37, quote = 0.25, timeline = 0.27,
 }
 -- The order cards are offered in when editing a page.
 A.DASH_CARDS = { "banner", "continue", "activity", "week_rings", "month_rings", "month_totals", "month_chart",
                  "when_read", "goal", "bookclub", "tbr", "genres", "year_covers", "week", "year_chart",
-                 "year_time", "heatmap", "finished", "longest_year", "longest_month", "deadline" }
+                 "year_time", "heatmap", "finished", "longest_year", "longest_month", "deadline",
+                 "trends", "challenge", "forecast", "control", "compare",
+                 "library", "authors", "pick", "quote", "timeline" }
 A.DASH_MAX_ROWS = 6
+A.DASH_MAX_PAGES = 7
+
+-- Pages the reader added: { { id = "c1", label = "My page" }, ... } under
+-- dash_custom. Their rows are kept like any page's, under dash_rows_<id>.
+local function customPages()
+    local out = {}
+    local list = A.get("dash_custom", nil)
+    if type(list) ~= "table" then return out end
+    for _, e in ipairs(list) do
+        if type(e) == "table" and type(e.id) == "string" and e.id:match("^c%d+$") then
+            out[#out + 1] = { id = e.id, label = (type(e.label) == "string" and e.label ~= "") and e.label or "My page",
+                custom = true, rows = { { type(e.first) == "string" and e.first or "continue" } } }
+        end
+    end
+    return out
+end
+
+--- Every page, built in and added, in the reader's order (dash_order).
+function A.dashPages()
+    local all, natural = {}, {}
+    for _, p in ipairs(A.DASH_PAGES) do all[#all + 1] = p end
+    for _, p in ipairs(customPages()) do all[#all + 1] = p end
+    for i, p in ipairs(all) do natural[p.id] = i end
+    local order = A.get("dash_order", nil)
+    if type(order) == "table" then
+        local pos = {}
+        for i, id in ipairs(order) do if type(id) == "string" and not pos[id] then pos[id] = i end end
+        table.sort(all, function(a, b)
+            local pa, pb = pos[a.id] or (1000 + natural[a.id]), pos[b.id] or (1000 + natural[b.id])
+            return pa < pb
+        end)
+    end
+    return all
+end
 local ROW_HEIGHTS = { { 0.7, "Shorter" }, { 1, "Normal" }, { 1.35, "Taller" }, { 1.8, "Tallest" } }
 
 local function pageById(id)
-    for _, page in ipairs(A.DASH_PAGES) do if page.id == id then return page end end
+    for _, page in ipairs(A.dashPages()) do if page.id == id then return page end end
     return nil
 end
 
@@ -566,16 +608,18 @@ local function rowWeight(row)
     return wgt * (row.k or 1)
 end
 
--- The tabs: one per page that is switched on.
+-- The tabs: one per page that is switched on. Returns them and the pages
+-- they index into.
 local function dashTabs()
     local tabs = {}
-    for i, page in ipairs(A.DASH_PAGES) do
+    local pages = A.dashPages()
+    for i, page in ipairs(pages) do
         if A.get("dash_page_" .. page.id, true) ~= false then
-            tabs[#tabs + 1] = { kind = "page", page = i, label = pageLabel(page) }
+            tabs[#tabs + 1] = { kind = "page", page = i, label = pageLabel(page), id = page.id }
         end
     end
-    if #tabs == 0 then tabs[1] = { kind = "page", page = 1, label = pageLabel(A.DASH_PAGES[1]) } end
-    return tabs
+    if #tabs == 0 then tabs[1] = { kind = "page", page = 1, label = pageLabel(pages[1]), id = pages[1].id } end
+    return tabs, pages
 end
 
 -- Space left clear around the page, so cards do not sit on its edge.
@@ -603,9 +647,9 @@ local function buildDashboard(ctx, w, h)
     local th = A.theme()
     local ts = textScale()
     local gap = max(6, floor(min(w, h) * 0.016 + 0.5))
-    local tabs = dashTabs()
+    local tabs, pages = dashTabs()
     local page_i = currentPage(tabs)
-    local page = A.DASH_PAGES[page_i]
+    local page = pages[page_i]
 
     -- Everything is laid out inside a margin: from here on w and h are the
     -- space inside it, and (ox, oy) is where that space starts.
@@ -675,6 +719,14 @@ local function buildDashboard(ctx, w, h)
             local n_days = tonumber(os.date("%d", os.time{ year = vy, month = vm + 1, day = 0, hour = 12 })) or 30
             kicker = A.monthTitle(vy, vm) .. dot .. (current and ("day " .. t.day .. " of " .. n_days) or (n_days .. " days"))
             nav = { prev = (tonumber(A.state.month_offset) or 0) > -D.BACK_MONTHS, next = not current, today = not current }
+        elseif page.kicker == "library" then
+            -- "412 books · 168 read"
+            local lib = D.library(refresh)
+            kicker = lib and (A.plural(lib.total, "book", "books") .. dot .. A.thousands(lib.counts.finished) .. " read") or nil
+        elseif page.kicker == "streak" and st then
+            -- "Streak 147 days · best 150"
+            kicker = (st.streak > 0 and ("Streak " .. A.plural(st.streak, "day", "days")) or "No streak yet")
+                .. ((st.best or 0) > st.streak and (dot .. "best " .. st.best) or "")
         elseif st then
             kicker = "This week" .. dot .. A.plural(st.week_pages, "page", "pages")
         end
@@ -886,23 +938,97 @@ local function editRow(ctx, page, idx, back)
     end)
 end
 
+-- Every setting the Dashboard's layout is kept under (not the cards' own).
+local function layoutKeys()
+    local keys = { "dash_custom", "dash_order", "dash_margin" }
+    for _, page in ipairs(A.dashPages()) do
+        for _, k in ipairs{ "dash_rows_", "dash_label_", "dash_heading_", "dash_page_" } do keys[#keys + 1] = k .. page.id end
+    end
+    return keys
+end
+
+--- Every page, tab and row back as it came. Card settings and colours stay.
+function A.resetDashboard()
+    for _, k in ipairs(layoutKeys()) do A.set(k, nil) end
+    A.state.dash_page = 1
+    A.state.edit_page = nil
+end
+
+--- A new page at the end, starting with a card no page shows yet. Returns its id.
+function A.addPage(label)
+    if #A.dashPages() >= A.DASH_MAX_PAGES then return nil end
+    local list = A.get("dash_custom", nil)
+    local copy, top = {}, 0
+    if type(list) == "table" then
+        for _, e in ipairs(list) do
+            if type(e) == "table" and type(e.id) == "string" then
+                copy[#copy + 1] = { id = e.id, label = e.label, first = e.first }
+                top = max(top, tonumber(e.id:match("^c(%d+)$")) or 0)
+            end
+        end
+    end
+    local used = {}
+    for _, page in ipairs(A.dashPages()) do
+        if A.get("dash_page_" .. page.id, true) ~= false then
+            for _, r in ipairs(pageRows(page)) do for _, name in ipairs(r.cards) do used[name] = true end end
+        end
+    end
+    local first = "continue"
+    for _, name in ipairs(A.DASH_CARDS) do if not used[name] then first = name break end end
+    local id = "c" .. (top + 1)
+    copy[#copy + 1] = { id = id, label = label or ("Page " .. (#A.dashPages() + 1)), first = first }
+    A.set("dash_custom", copy)
+    return id
+end
+
+--- Take away a page the reader added.
+function A.removePage(id)
+    local list = A.get("dash_custom", nil)
+    local copy = {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do
+        if type(e) == "table" and e.id ~= id then copy[#copy + 1] = { id = e.id, label = e.label, first = e.first } end
+    end
+    A.set("dash_custom", #copy > 0 and copy or nil)
+    for _, k in ipairs{ "dash_rows_", "dash_label_", "dash_heading_", "dash_page_" } do A.set(k .. id, nil) end
+    local order = A.get("dash_order", nil)
+    if type(order) == "table" then
+        local keep = {}
+        for _, v in ipairs(order) do if v ~= id then keep[#keep + 1] = v end end
+        A.set("dash_order", keep)
+    end
+end
+
+--- Move a page one place left (-1) or right (+1) among the tabs.
+function A.movePage(id, step)
+    local pages = A.dashPages()
+    local ids, at = {}, nil
+    for i, p in ipairs(pages) do ids[i] = p.id; if p.id == id then at = i end end
+    local to = at and at + step
+    if not (at and to >= 1 and to <= #ids) then return false end
+    ids[at], ids[to] = ids[to], ids[at]
+    A.set("dash_order", ids)
+    return true
+end
+
 -- The pages: pick one, then its rows are listed. Tap a row to change it.
 local function editPages(ctx, back)
     local function again() editPages(ctx, back) end
     S.open(ctx, "Dashboard pages", function(api)
-        local page = pageById(A.state.edit_page) or A.DASH_PAGES[1]
+        local pages = A.dashPages()
+        local page = pageById(A.state.edit_page) or pages[1]
         local out = {}
-        local which = {}
-        for _, pg in ipairs(A.DASH_PAGES) do
-            which[#which + 1] = {
+        local line = {}
+        for _, pg in ipairs(pages) do
+            line[#line + 1] = {
                 text = ((pg.id == page.id) and CHECK or "") .. pageLabel(pg),
                 callback = function()
                     A.state.edit_page = pg.id
                     api.again()
                 end,
             }
+            if #line == 4 then out[#out + 1] = line; line = {} end
         end
-        out[#out + 1] = which
+        if #line > 0 then out[#out + 1] = line end
         local rows, edited = pageRows(page)
         out[#out + 1] = S.header("Rows, top to bottom (tap one to change it)")
         for i, row in ipairs(rows) do
@@ -923,6 +1049,7 @@ local function editPages(ctx, back)
             S.reload(ctx)
             editRow(ctx, page, #rows, again)
         end } }
+        out[#out + 1] = S.header("This page")
         out[#out + 1] = S.input(api, "Tab name", pageLabel(page), function(v)
             A.set("dash_label_" .. page.id, (v ~= "" and v ~= page.label) and v or nil)
         end)
@@ -930,8 +1057,31 @@ local function editPages(ctx, back)
             pageHeading(page), function(v) A.set("dash_heading_" .. page.id, v) end)
         out[#out + 1] = S.radio(api, { { true, "Page shown" }, { false, "Page hidden" } },
             A.get("dash_page_" .. page.id, true) ~= false, function(v) A.set("dash_page_" .. page.id, v) end)
-        out[#out + 1] = { { text = "Put this page back as it came", enabled = edited, callback = function()
-            A.set("dash_rows_" .. page.id, nil)
+        local at = 1
+        for i, pg in ipairs(pages) do if pg.id == page.id then at = i end end
+        out[#out + 1] = {
+            { text = "\xE2\x80\xB9 Move tab left", enabled = at > 1, callback = function()
+                A.movePage(page.id, -1); api.changed()
+            end },
+            { text = "Move tab right \xE2\x80\xBA", enabled = at < #pages, callback = function()
+                A.movePage(page.id, 1); api.changed()
+            end },
+        }
+        if page.custom then
+            out[#out + 1] = { { text = "Remove this page", callback = function()
+                A.removePage(page.id)
+                A.state.edit_page = nil
+                A.state.dash_page = 1
+                api.changed()
+            end } }
+        else
+            out[#out + 1] = { { text = "Put this page back as it came", enabled = edited, callback = function()
+                A.set("dash_rows_" .. page.id, nil)
+                api.changed()
+            end } }
+        end
+        out[#out + 1] = { { text = "+ Add a page", enabled = #pages < A.DASH_MAX_PAGES, callback = function()
+            A.state.edit_page = A.addPage() or A.state.edit_page
             api.changed()
         end } }
         if back then
@@ -958,7 +1108,7 @@ function Dashboard.show_settings(ctx)
                 S.open(ctx, "Card settings", function(sub)
                     local list, seen = {}, {}
                     local line = {}
-                    for _, page in ipairs(A.DASH_PAGES) do
+                    for _, page in ipairs(A.dashPages()) do
                         for _, r in ipairs(pageRows(page)) do
                             for _, name in ipairs(r.cards) do
                                 if not seen[name] then
@@ -982,6 +1132,22 @@ function Dashboard.show_settings(ctx)
             rows[#rows + 1] = { { text = "Look and colours" .. ELLIPSIS, callback = function()
                 api.close()
                 S.look(ctx, show)
+            end } }
+            rows[#rows + 1] = { { text = "Put the whole Dashboard back as it came" .. ELLIPSIS, callback = function()
+                api.close()
+                local UIManager = require("ui/uimanager")
+                local ConfirmBox = require("ui/widget/confirmbox")
+                UIManager:show(ConfirmBox:new{
+                    text = "Put every page, tab and row of the Dashboard back as it came?\n\n"
+                        .. "Pages you added are removed. Each card's own settings and the colours are kept.",
+                    ok_text = "Put back",
+                    ok_callback = function()
+                        A.resetDashboard()
+                        S.reload(ctx)
+                        show()
+                    end,
+                    cancel_callback = function() show() end,
+                })
             end } }
             return rows
         end)

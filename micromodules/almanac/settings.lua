@@ -201,6 +201,51 @@ function S.pick(ctx, api, label, options, current, on_pick)
     } }
 end
 
+-- "Label: a, b" row that opens a list to tick any number from (none = any).
+-- options = { { value, label }, ... }; current = list of values.
+function S.multi(ctx, api, label, options, current, on_change, any_label)
+    current = type(current) == "table" and current or {}
+    local shown = #current == 0 and (any_label or "any") or shorten(table.concat(current, ", "), 28)
+    return { {
+        text = label .. ": " .. shown,
+        callback = function()
+            api.close()
+            local function show()
+                S.open(ctx, label, function(sub)
+                    local on = {}
+                    for _, v in ipairs(current) do on[v:lower()] = true end
+                    local rows, line = {}, {}
+                    rows[#rows + 1] = { { text = ((#current == 0) and CHECK or "") .. (any_label or "Any"), callback = function()
+                        current = {}
+                        on_change(nil)
+                        sub.close(); show()
+                    end } }
+                    for _, opt in ipairs(options) do
+                        local v = opt[1]
+                        line[#line + 1] = {
+                            text = (on[v:lower()] and CHECK or "") .. shorten(opt[2], 26),
+                            callback = function()
+                                local list = {}
+                                for _, cur in ipairs(current) do if cur:lower() ~= v:lower() then list[#list + 1] = cur end end
+                                if not on[v:lower()] then list[#list + 1] = v end
+                                current = list
+                                on_change(#list > 0 and list or nil)
+                                sub.close(); show()
+                            end,
+                        }
+                        if #line == 2 then rows[#rows + 1] = line; line = {} end
+                    end
+                    if #line > 0 then rows[#rows + 1] = line end
+                    if #options == 0 then rows[#rows + 1] = S.header("Nothing to choose from yet") end
+                    rows[#rows + 1] = { { text = tr("Back"), callback = function() sub.close(); reload(ctx); api.again() end } }
+                    return rows
+                end)
+            end
+            show()
+        end,
+    } }
+end
+
 -- ─── per-card rows ───────────────────────────────────────────────────────────
 
 
@@ -294,6 +339,193 @@ ROWS.year_covers = function(env, api)
         S.header("Layout"),
         S.radio(api, { { "wall", "Cover wall" }, { "months", "Stacked by month" } }, env.cfg("layout", "wall"),
             function(v) env.setcfg("layout", v ~= "wall" and v or nil) end),
+    }
+end
+
+ROWS.challenge = function(env, api)
+    local metric = env.cfg("metric", "auto")
+    local manual = tonumber(env.cfg("target", nil))
+    local auto = D.challenge(nil, metric, nil)
+    local unit = auto and ({ pages = "pages", minutes = "minutes", days = "days" })[auto.metric] or ""
+    local rows = {
+        S.header("The challenge counts"),
+        S.radio(api, { { "auto", "Auto" }, { "pages", "Pages" }, { "minutes", "Minutes" }, { "days", "Reading days" } },
+            metric, function(v) env.setcfg("metric", v ~= "auto" and v or nil) end),
+        S.input(api, "Target", manual, function(v) env.setcfg("target", v) end, {
+            number = true, min = 1, max = 1000000,
+            empty_label = "auto" .. (auto and (" (" .. A.thousands(auto.target) .. " " .. unit .. ")") or ""),
+            description = "How many " .. (unit ~= "" and unit or "pages, minutes or days") .. " to read this month.",
+        }),
+    }
+    if manual then
+        rows[#rows + 1] = { { text = "Use the automatic target", callback = function()
+            env.setcfg("target", nil)
+            api.changed()
+        end } }
+    end
+    rows[#rows + 1] = S.header("Auto takes turns month by month and aims a little above your last three months.")
+    return rows
+end
+
+ROWS.forecast = function(env, api)
+    return {
+        S.header("Books listed"),
+        S.radio(api, { { 1, "1" }, { 2, "2" }, { 3, "3" } }, tonumber(env.cfg("count", 3)) or 3,
+            function(v) env.setcfg("count", v) end),
+    }
+end
+
+-- One Control centre button: its action, icon and name.
+function S.controlButton(ctx, i, back)
+    local function current() return A.controlButtons(8)[i] end
+    S.open(ctx, "Button " .. i, function(api)
+        local e = current()
+        local rows = {}
+        rows[#rows + 1] = S.header("Does: " .. tostring(e.label or "an action"))
+        local ok, Chooser = pcall(require, "lib/bookshelf_action_chooser")
+        if ok and type(Chooser) == "table" and Chooser.actionRows then
+            local function close(fn) return function() api.close(); fn() end end
+            local ok2, extra = pcall(Chooser.actionRows, close, function(fields)
+                fields.icon = fields.icon or e.icon
+                A.setControlButton(i, fields)
+                S.reload(ctx)
+                S.controlButton(ctx, i, back)
+            end)
+            if ok2 and type(extra) == "table" then
+                for _, r in ipairs(extra) do rows[#rows + 1] = r end
+            end
+        end
+        rows[#rows + 1] = { { text = "Icon" .. ELLIPSIS, callback = function()
+            api.close()
+            local okl, Lib = pcall(require, "lib/bookshelf_icons_library")
+            if not (okl and Lib and Lib.show) then return S.controlButton(ctx, i, back) end
+            Lib:show(function(value)
+                if value and value ~= "" then
+                    local copy = {}
+                    for k, v in pairs(current()) do copy[k] = v end
+                    copy.icon = value
+                    A.setControlButton(i, copy)
+                    S.reload(ctx)
+                end
+                S.controlButton(ctx, i, back)
+            end, { dynamic = false, svg = false })
+        end } }
+        rows[#rows + 1] = S.input(api, "Name", e.label or "", function(v)
+            local copy = {}
+            for k, val in pairs(current()) do copy[k] = val end
+            copy.label = v
+            A.setControlButton(i, copy)
+        end)
+        rows[#rows + 1] = { { text = "Put this button back as it came", callback = function()
+            A.setControlButton(i, nil)
+            api.changed()
+        end } }
+        if back then
+            rows[#rows + 1] = { { text = tr("Back"), callback = function() api.close(); back() end } }
+        end
+        return rows
+    end)
+end
+
+ROWS.control = function(env, api, ctx)
+    local count = A.clamp(tonumber(env.cfg("count", 6)) or 6, 1, 8)
+    local rows = {
+        S.header("Buttons"),
+        S.radio(api, { { 1, "1" }, { 2, "2" }, { 3, "3" }, { 4, "4" } }, count, function(v) env.setcfg("count", v) end),
+        S.radio(api, { { 5, "5" }, { 6, "6" }, { 7, "7" }, { 8, "8" } }, count, function(v) env.setcfg("count", v) end),
+    }
+    local list = A.controlButtons(count)
+    for i = 1, count do
+        rows[#rows + 1] = { { text = i .. ". " .. tostring(list[i].label or "an action") .. ELLIPSIS, callback = function()
+            api.close()
+            S.controlButton(ctx, i, function() S.card("control", ctx, function() return A.makeEnv("control", ctx, 0, 0) end) end)
+        end } }
+    end
+    rows[#rows + 1] = S.header("Front light")
+    rows[#rows + 1] = S.radio(api, { { true, "Brightness shown" }, { false, "Brightness hidden" } },
+        env.cfg("brightness", true) ~= false, function(v) if v then env.setcfg("brightness", nil) else env.setcfg("brightness", false) end end)
+    rows[#rows + 1] = S.radio(api, { { true, "Warmth shown" }, { false, "Warmth hidden" } },
+        env.cfg("warmth", true) ~= false, function(v) if v then env.setcfg("warmth", nil) else env.setcfg("warmth", false) end end)
+    return rows
+end
+
+ROWS.mini = function(env, api, ctx)
+    local options = { { "none", "Nothing" } }
+    for _, k in ipairs(A.MINI_TILES) do options[#options + 1] = { k, A.MINI_LABEL[k] } end
+    local rows = { S.header("Small cards, left to right (as many as fit)") }
+    for i = 1, A.MINI_MAX do
+        rows[#rows + 1] = S.pick(ctx, api, "Card " .. i, options, env.cfg("tile" .. i, A.MINI_DEFAULT[i] or "none"),
+            function(v) env.setcfg("tile" .. i, v) end)
+    end
+    rows[#rows + 1] = { { text = "Control centre buttons" .. ELLIPSIS, callback = function()
+        api.close()
+        S.card("control", ctx, function() return A.makeEnv("control", ctx, 0, 0) end)
+    end } }
+    rows[#rows + 1] = S.header("Rings goals, the challenge and the buttons are shared with their own cards.")
+    return rows
+end
+
+ROWS.compare = function(env, api)
+    return {
+        S.header("Compare"),
+        S.radio(api, { { "week", "This week" }, { "month", "This month" }, { "year", "This year" } },
+            env.cfg("period", "week"), function(v) env.setcfg("period", v ~= "week" and v or nil) end),
+        S.header("Shows"),
+        S.radio(api, { { "time", "Time read" }, { "pages", "Pages" }, { "both", "Both" } },
+            env.cfg("show", "time"), function(v) env.setcfg("show", v ~= "time" and v or nil) end),
+    }
+end
+
+ROWS.library = function(env, api)
+    return {
+        S.header("Counts every book in Bookshelf's library, every 15 minutes at most."),
+        { { text = "Count again now", callback = function()
+            D.recountLibrary()
+            api.changed()
+        end } },
+    }
+end
+
+ROWS.authors = function(env, api)
+    return {
+        S.header("Most read by"),
+        S.radio(api, { { "books", "Books finished" }, { "time", "Time read" } }, env.cfg("by", "books"),
+            function(v) env.setcfg("by", v ~= "books" and v or nil) end),
+        S.header("Authors listed"),
+        S.radio(api, { { 3, "3" }, { 5, "5" }, { 8, "8" } }, tonumber(env.cfg("count", 5)) or 5,
+            function(v) env.setcfg("count", v ~= 5 and v or nil) end),
+    }
+end
+
+ROWS.pick = function(env, api, ctx)
+    local lib = D.library() or { books = {} }
+    local function values(field)
+        local out = {}
+        for _, v in ipairs(D.libraryValues(lib, field)) do out[#out + 1] = { v.name, v.name .. " (" .. v.n .. ")" } end
+        return out
+    end
+    local function choose(key) return function(v) env.setcfg(key, v) end end
+    return {
+        S.header("A new pick"),
+        S.radio(api, { { "day", "Every day" }, { "week", "Every week" }, { "month", "Every month" }, { "tap", "When I tap Another" } },
+            env.cfg("every", "week"), function(v) env.setcfg("every", v ~= "week" and v or nil) end),
+        S.pick(ctx, api, "Pick from", collectionOptions("The whole library"), env.cfg("coll", ""), choose("coll")),
+        S.multi(ctx, api, "Only these genres", values("genres"), env.cfg("genres", nil), choose("genres"), "Any genre"),
+        S.multi(ctx, api, "Only these authors", values("authors"), env.cfg("authors", nil), choose("authors"), "Any author"),
+        S.header("Only books you haven't started. In a series, only the next one."),
+        S.header("Tapping the cover"),
+        S.radio(api, { { "open", "Opens the book" }, { "details", "Shows book details" } },
+            env.cfg("tap", "open"), function(v) env.setcfg("tap", v ~= "open" and v or nil) end),
+    }
+end
+
+ROWS.quote = function(env, api)
+    return {
+        S.header("Shares its pick with Bookshelf's Quote of the day."),
+        { { text = "Show another quote", callback = function()
+            D.nextQuote()
+            api.changed()
+        end } },
     }
 end
 
