@@ -1,0 +1,104 @@
+-- Run from the repository root: lua tests/i18n_spec.lua (Lua 5.1+/LuaJIT).
+local root = "micromodules/almanac/"
+local count = 0
+local function eq(actual, expected)
+    count = count + 1
+    assert(actual == expected, tostring(actual) .. " ~= " .. tostring(expected))
+end
+local function locale(language)
+    G_reader_settings = { readSetting = function() return language end }
+    return dofile(root .. "i18n.lua")
+end
+local it = locale("it_IT")
+eq(it.gettext("Continue reading"), "Continua a leggere")
+eq(it.gettext("Unknown message"), "Unknown message")
+eq(it.ngettext("day streak", "day streak", 1), "giorno consecutivo")
+eq(it.ngettext("day streak", "day streak", 3), "giorni consecutivi")
+eq(it.ngettext("book", "books", 0), "libri")
+eq(it.ngettext("book", "books", 1), "libro")
+eq(it.ngettext("book", "books", 2), "libri")
+eq(it.format("%1's books", "ottobre"), "Libri di ottobre")
+eq(it.format("%2 / %1", "100%", "Reading"), "Reading / 100%")
+eq(it.format("%1 / %1 / %2", "%2", "Book"), "%2 / %2 / Book")
+eq(it.format("%1 / %2", "Book"), "Book / %2")
+local when = os.time{year = 2026, month = 10, day = 21, hour = 12}
+eq(it.date("%A %d %B %Y", when), "mercoledì 21 ottobre 2026")
+eq(it.date("%a %b %%B", when), "mer ott %B")
+eq(it.monthLetter(7), "L")
+eq(it.dayLetter(2), "L")
+for _, language in ipairs{ "it", "it-IT", "it_IT.UTF-8", "IT_it" } do
+    eq(locale(language).gettext("Close"), "Chiudi")
+end
+for _, language in ipairs{ "en", "en_GB", "C", "fr_FR", "../../it", "" } do
+    local en = locale(language)
+    eq(en.gettext("Continue reading"), "Continue reading")
+    eq(en.date("%A %B", when), "Wednesday October")
+    eq(en.ngettext("book", "books", 0), "books")
+    eq(en.ngettext("book", "books", 1), "book")
+end
+G_reader_settings = nil
+eq(dofile(root .. "i18n.lua").gettext("Close"), "Close")
+G_reader_settings = {readSetting = function() return false end}
+eq(dofile(root .. "i18n.lua").gettext("Close"), "Close")
+
+-- Unsupported locales keep Bookshelf's existing localized dates. A catalog
+-- we own must not be relocalized by the host a second time.
+package.preload["lib/bookshelf_localdate"] = function()
+    return {localize = function() return "Host date" end}
+end
+eq(locale("fr_FR").date("%B", when), "Host date")
+eq(locale("it_IT").date("%B", when), "ottobre")
+package.preload["lib/bookshelf_localdate"] = nil
+package.loaded["lib/bookshelf_localdate"] = nil
+
+-- All source messages and numbered placeholders must be covered in Italian.
+local catalog = dofile(root .. "locales/it.lua").messages
+local function decode(literal) return assert(loadstring and loadstring("return " .. literal) or load("return " .. literal))() end
+local function checkMessage(message)
+    assert(catalog[message], "Missing Italian translation: " .. message)
+    local function placeholders(s)
+        local out = {}
+        for n in s:gmatch("%%(%d+)") do out[#out + 1] = n end
+        table.sort(out)
+        return table.concat(out, ",")
+    end
+    eq(placeholders(message), placeholders(catalog[message]))
+end
+for _, name in ipairs{ "init", "data", "panels", "settings", "modules" } do
+    local file = assert(io.open(root .. name .. ".lua"))
+    local source = file:read("*a"); file:close()
+    assert(loadfile(root .. name .. ".lua"))
+    for literal in source:gmatch('T%(("[^\n]-")%)') do checkMessage(decode(literal)) end
+    for literal in source:gmatch('A%.tr%(("[^\n]-")%s*,') do checkMessage(decode(literal)) end
+end
+for _, message in ipairs{ "book", "books", "page", "pages", "day", "days", "minutes" } do checkMessage(message) end
+
+-- Load the full kit: IDs, settings keys and user content must stay unchanged.
+for _, language in ipairs{ "C", "it_IT" } do
+    locale(language)
+    local A = dofile(root .. "init.lua")
+    local italian = language == "it_IT"
+    eq(A.NAME, "Reading Log")
+    eq(A.module("continue").key, "alm_continue")
+    eq(A.module("continue").title, "Reading Log · " .. (italian and "Continua a leggere" or "Continue reading"))
+    eq(A.Dashboard.key, "alm_dashboard")
+    eq(A.thousands(14894), italian and "14.894" or "14,894")
+    eq(A.thousands(-1234567), italian and "-1.234.567" or "-1,234,567")
+    eq(A.thousands(123), "123")
+    eq(A.thousands(1000), italian and "1.000" or "1,000")
+    eq(A.decimal(2.5), italian and "2,5" or "2.5")
+    eq(A.plural(0, "book", "books"), italian and "0 libri" or "0 books")
+    eq(A.plural(1, "book", "books"), italian and "1 libro" or "1 book")
+    eq(A.plural(2, "book", "books"), italian and "2 libri" or "2 books")
+    eq(A.safe("Reading"), "Reading")
+    A.set("dash_label_today", "Reading")
+    eq(A.get("dash_label_today"), "Reading")
+    A.set("control_buttons", { {label = "Reading", action = {suspend = true}} })
+    eq(A.controlButtons(1)[1].label, "Reading")
+    eq(A.CONTROL_DEFAULTS[1].action.toggle_wifi, true)
+    eq(A.D.TREND_DEFS[1].id, "time")
+    eq(A.dashPages()[1].id, "today")
+    local cmp = A.D.compareFrom({}, "week", "pages", os.date("*t", when), 2)
+    eq(cmp.sentence, italian and "Ancora nessuna lettura nei due periodi: questa settimana / la settimana scorsa." or "Nothing read this week or last week yet.")
+end
+print("i18n: " .. count .. " assertions passed")
