@@ -55,6 +55,14 @@ Bookshelf's look, including its dark theme.
 - A colour screen is optional. On a black-and-white screen the colours show
   as greys.
 
+## Languages
+
+Reading Log follows KOReader's interface language. English and Italian are
+included. Select **Italiano** in KOReader and restart to use the Italian
+cards, dashboard and settings. Other languages fall back to English.
+Keep the `almanac/locales/` folder when installing or updating.
+See [Translating Reading Log](docs/TRANSLATING.md) to add another language.
+
 ## Install
 
 1. Download `reading-log-1.1.0.zip` from [Releases](../../releases) and
