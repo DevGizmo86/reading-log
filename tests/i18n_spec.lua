@@ -105,11 +105,30 @@ eq(locale("it_IT").date("%B", when), "ottobre")
 package.preload["lib/bookshelf_localdate"] = nil
 package.loaded["lib/bookshelf_localdate"] = nil
 
--- All source messages and numbered placeholders must be covered in Italian.
-local catalog = dofile(root .. "locales/it.lua").messages
+-- Spanish and Brazilian Portuguese
+local es = locale("es")
+eq(es.gettext("Continue reading"), "Seguir leyendo")
+eq(es.ngettext("book", "books", 1), "libro")
+eq(es.ngettext("book", "books", 3), "libros")
+eq(es.ngettext("day streak", "day streak", 1), "día de racha")
+eq(es.date("%A %d %B %Y", when), "miércoles 21 octubre 2026")
+eq(es.dayLetter(4), "X")
+eq(locale("es_MX").gettext("Close"), "Cerrar")
+local pt = locale("pt_BR")
+eq(pt.gettext("Continue reading"), "Continuar lendo")
+eq(pt.ngettext("book", "books", 2), "livros")
+eq(pt.date("%A %d %B", when), "quarta-feira 21 outubro")
+eq(pt.monthLetter(3), "M")
+eq(locale("pt-BR").gettext("Close"), "Fechar")
+eq(locale("pt_BR.UTF-8").gettext("Close"), "Fechar")
+-- European Portuguese has no catalog of its own yet: English
+eq(locale("pt_PT").gettext("Close"), "Close")
+
+-- All source messages and numbered placeholders must be covered in every catalog.
+local catalog, catalog_name
 local function decode(literal) return assert(loadstring and loadstring("return " .. literal) or load("return " .. literal))() end
 local function checkMessage(message)
-    assert(catalog[message], "Missing Italian translation: " .. message)
+    assert(catalog[message], "Missing " .. catalog_name .. " translation: " .. message)
     local function placeholders(s)
         local out = {}
         for n in s:gmatch("%%(%d+)") do out[#out + 1] = n end
@@ -118,16 +137,29 @@ local function checkMessage(message)
     end
     eq(placeholders(message), placeholders(catalog[message]))
 end
-for _, name in ipairs{ "init", "data", "panels", "settings", "modules" } do
-    local file = assert(io.open(root .. name .. ".lua"))
-    local source = file:read("*a"); file:close()
-    assert(loadfile(root .. name .. ".lua"))
-    for literal in source:gmatch('T%(("[^\n]-")%)') do checkMessage(decode(literal)) end
-    for literal in source:gmatch('A%.tr%(("[^\n]-")%s*,') do checkMessage(decode(literal)) end
+for _, code in ipairs{ "it", "es", "pt_br" } do
+    catalog, catalog_name = dofile(root .. "locales/" .. code .. ".lua").messages, code
+    for _, name in ipairs{ "init", "data", "panels", "settings", "modules" } do
+        local file = assert(io.open(root .. name .. ".lua"))
+        local source = file:read("*a"); file:close()
+        assert(loadfile(root .. name .. ".lua"))
+        for literal in source:gmatch('T%(("[^\n]-")%)') do checkMessage(decode(literal)) end
+        for literal in source:gmatch('A%.tr%(("[^\n]-")%s*,') do checkMessage(decode(literal)) end
+    end
+    for _, message in ipairs{ "book", "books", "page", "pages", "day", "days", "minutes" } do checkMessage(message) end
 end
-for _, message in ipairs{ "book", "books", "page", "pages", "day", "days", "minutes" } do checkMessage(message) end
 
 -- Load the full kit: IDs, settings keys and user content must stay unchanged.
+for _, language in ipairs{ "es", "pt_BR" } do
+    locale(language)
+    local A = dofile(root .. "init.lua")
+    eq(A.module("continue").key, "alm_continue")
+    eq(A.thousands(14894), "14.894")
+    eq(A.plural(2, "book", "books"), language == "es" and "2 libros" or "2 livros")
+    local cmp = A.D.compareFrom({}, "week", "pages", os.date("*t", when), 2)
+    eq(cmp.sentence, language == "es" and "Todavía no has leído nada esta semana ni la semana pasada."
+        or "Nada lido esta semana nem na semana passada ainda.")
+end
 for _, language in ipairs{ "C", "it_IT" } do
     locale(language)
     local A = dofile(root .. "init.lua")

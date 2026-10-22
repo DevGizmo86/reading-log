@@ -1,8 +1,10 @@
 # Translating Reading Log
 
-Reading Log follows KOReader's interface language. English and Italian are
-included; selecting **Italiano** in KOReader and restarting also translates
-the cards, dashboard tabs and module settings. There is no separate language
+Reading Log follows KOReader's interface language. English, Italian
+(`it.lua`), Spanish (`es.lua`) and Brazilian Portuguese (`pt_br.lua`) are
+included; selecting one of them in KOReader and restarting also translates
+the cards, dashboard tabs and module settings. European Portuguese (`pt_PT`)
+has no catalog yet and falls back to English. There is no separate language
 setting. Install the entire `micromodules/almanac/` folder, including `locales/`.
 
 The active `gettext.current_lang` is authoritative, including KOReader's
@@ -67,6 +69,7 @@ module definitions are rebuilt on that restart too.
 
 The standalone test loads both language modes, checks locale variants,
 English fallback, dates and calendar initials, numbers, plurals, placeholder
-preservation, Italian source-message coverage, and stable IDs/user labels.
+preservation, source-message coverage in every catalog, and stable IDs/user
+labels.
 It does not emulate KOReader's fonts or an e-ink display. Before merging a
 new translation, inspect the actual layout on a reader or in the emulator.

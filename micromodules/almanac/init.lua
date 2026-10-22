@@ -24,7 +24,7 @@ card colour. These cards each have their own colour, so they fill their cell
 with a rounded panel and draw on that instead.
 ]]
 
-local A = { VERSION = "1.1.0", NAME = "Reading Log" }
+local A = { VERSION = "1.2.0", NAME = "Reading Log" }
 
 A.dir = (debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$")) or "."
 

@@ -57,15 +57,16 @@ Bookshelf's look, including its dark theme.
 
 ## Languages
 
-Reading Log follows KOReader's interface language. English and Italian are
-included. Select **Italiano** in KOReader and restart to use the Italian
-cards, dashboard and settings. Other languages fall back to English.
+Reading Log follows KOReader's interface language. It comes in English,
+Italian, Spanish and Brazilian Portuguese: pick **Italiano**, **Español** or
+**Português do Brasil** in KOReader's language menu and restart, and the
+cards, Dashboard and settings follow. Other languages fall back to English.
 Keep the `almanac/locales/` folder when installing or updating.
 See [Translating Reading Log](docs/TRANSLATING.md) to add another language.
 
 ## Install
 
-1. Download `reading-log-1.1.0.zip` from [Releases](../../releases) and
+1. Download `reading-log-1.2.0.zip` from [Releases](../../releases) and
    unzip it.
 2. Connect your e-reader to your computer by USB.
 3. On the e-reader, open `.adds/koreader/settings/bookshelf/`.
@@ -265,6 +266,8 @@ read are worked out, and setting up the book club.
   which these cards plug into.
 - [KOReader](https://github.com/koreader/koreader) and its Reading
   statistics plugin, where all the numbers come from.
+- [DevGizmo86](https://github.com/DevGizmo86), who added the translation
+  system and the Italian translation.
 
 Made by Steven ([@stevenzamora1](https://github.com/stevenzamora1)).
 

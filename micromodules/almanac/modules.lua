@@ -670,6 +670,11 @@ local function buildDashboard(ctx, w, h)
         local inner = bar_w - bar_h * 0.5
         local cell = inner / #tabs
         local size = max(10, floor(bar_h * 0.36 * ts + 0.5))
+        -- a tab name too long for its cell (longer words in some languages)
+        -- makes every tab's text a little smaller rather than cutting it off
+        local widest = 0
+        for _, tab in ipairs(tabs) do widest = max(widest, c:text(tab.label, size, { bold = true }).w) end
+        if widest > cell - 6 then size = max(10, floor(size * (cell - 10) / widest)) end
         local fill = A.shown(dark and th.gold or th.wine)
         local on_fill = A.shown(dark and th.ink or th.paper)
         for i, tab in ipairs(tabs) do

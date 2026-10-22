@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- **Languages:** Reading Log follows KOReader's interface language. Italian
+  (thanks to [DevGizmo86](https://github.com/DevGizmo86), who also built the
+  translation system), Spanish and Brazilian Portuguese. It uses the language
+  KOReader is actually showing, including its automatic system language, and
+  notes in KOReader's log which translation it loaded.
+- Tab names and the Random pick heading get a little smaller instead of being
+  cut off when a translation is longer.
+
 ## 1.1.0
 
 - **Reading trends:** your last 90 days against your last year, like the

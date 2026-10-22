@@ -4126,7 +4126,12 @@ function P.pick.build(env)
     local tw = w - pad - tx
     local btn_h = fpx(54)
     local y = pad
-    local t_k = c:text(PICK_WHEN[pickCfg("every", "week")] or T("Random pick"), fpx(22), { bold = true, caps = true, color = tone.accent, max_w = tw })
+    local kick = PICK_WHEN[pickCfg("every", "week")] or T("Random pick")
+    local k_px = fpx(22)
+    local k_full = c:text(kick, k_px, { bold = true, caps = true })
+    -- a longer heading (some languages) gets smaller before it is cut short
+    if k_full.w > tw then k_px = max(minFont(), floor(k_px * tw / k_full.w)) end
+    local t_k = c:text(kick, k_px, { bold = true, caps = true, color = tone.accent, max_w = tw })
     local by_ = h - pad - btn_h
     local with_btns = by_ - y >= btn_h * 2.2
     if not with_btns then by_ = h - pad end
@@ -4803,7 +4808,12 @@ function MINI.pick(c, env, x, y, w, h, px, fpx, tone)
     local tx = x + cov_w + px(18)
     local room = x + w - tx
     local lines = {
-        c:text(PICK_WHEN[pickCfg("every", "week")] or T("Random pick"), fpx(18), { bold = true, caps = true, color = tone.accent, max_w = room }),
+        (function()
+            local kick, k_px = PICK_WHEN[pickCfg("every", "week")] or T("Random pick"), fpx(18)
+            local k_full = c:text(kick, k_px, { bold = true, caps = true })
+            if k_full.w > room then k_px = max(minFont(), floor(k_px * room / k_full.w)) end
+            return c:text(kick, k_px, { bold = true, caps = true, color = tone.accent, max_w = room })
+        end)(),
         c:textbox(b.title or "", fpx(26), room, 2, { bold = true, color = tone.fg }),
     }
     if b.authors[1] then lines[#lines + 1] = c:text(b.authors[1], fpx(20), { color = tone.muted, max_w = room }) end
