@@ -2,26 +2,62 @@
 -- domain or process locale. Like KOReader, language changes take effect on restart.
 local I = {}
 local dir = debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$") or "."
+local failures = {}
+
+local function log(level, message)
+    local ok, logger = pcall(require, "logger")
+    if ok and logger and type(logger[level]) == "function" then
+        logger[level]("[reading-log i18n] " .. message)
+    end
+end
 
 local function loadCatalog(code)
-    local chunk = loadfile(dir .. "/locales/" .. code .. ".lua")
-    if not chunk then return nil end
+    local path = dir .. "/locales/" .. code .. ".lua"
+    local chunk, err = loadfile(path)
+    if not chunk then failures[#failures + 1] = tostring(err); return nil end
     local ok, catalog = pcall(chunk)
     if ok and type(catalog) == "table" then return catalog end
+    failures[#failures + 1] = path .. ": " .. (ok and "catalog must return a table" or tostring(catalog))
 end
 
-local code = "en"
-if G_reader_settings and G_reader_settings.readSetting then
-    code = G_reader_settings:readSetting("language") or code
+local function detectLanguage()
+    -- gettext has already been initialized by KOReader. Its active language
+    -- also covers automatic/system language and runtime overrides, which may
+    -- not have a corresponding saved "language" setting.
+    local ok, gettext = pcall(require, "gettext")
+    if ok and type(gettext) == "table" and type(gettext.current_lang) == "string"
+            and gettext.current_lang ~= "" then
+        return gettext.current_lang, "gettext"
+    end
+    if G_reader_settings and G_reader_settings.readSetting then
+        local language = G_reader_settings:readSetting("language")
+        if type(language) == "string" and language ~= "" then return language, "settings" end
+    end
+    return "en", "default"
 end
+
+local code, source = detectLanguage()
+I.requested_language, I.language_source = code, source
 -- Accept regional variants (it_IT, it-IT, it_IT.UTF-8) without allowing paths.
 code = type(code) == "string" and code:match("^([%a][%a%d_-]*)") or "en"
 code = (code or "en"):gsub("-", "_"):lower()
 local base = code:match("^([^_]+)")
 local english = assert(loadCatalog("en"), "Reading Log: missing English locale")
-local catalog = loadCatalog(code) or (base ~= code and loadCatalog(base)) or english
-I.language = catalog == english and "en" or code
+local catalog, selected
+if code == "en" or code == "c" then
+    catalog, selected = english, "en"
+else
+    catalog, selected = loadCatalog(code), code
+    if not catalog and base ~= code then catalog, selected = loadCatalog(base), base end
+    if not catalog then catalog, selected = english, "en" end
+end
+I.language = selected
 local messages = catalog.messages or {}
+log("info", "requested=" .. I.requested_language .. " source=" .. source
+    .. " catalog=" .. selected .. " directory=" .. dir .. "/locales")
+if selected == "en" and base ~= "en" and code ~= "c" then
+    log("warn", "English fallback: " .. table.concat(failures, "; "))
+end
 
 function I.gettext(message)
     return messages[message] or message

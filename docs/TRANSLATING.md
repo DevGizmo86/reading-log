@@ -5,6 +5,12 @@ included; selecting **Italiano** in KOReader and restarting also translates
 the cards, dashboard tabs and module settings. There is no separate language
 setting. Install the entire `micromodules/almanac/` folder, including `locales/`.
 
+The active `gettext.current_lang` is authoritative, including KOReader's
+automatic/system language. If gettext is unavailable, the saved `language`
+setting is used, then English. The startup log records the requested language,
+its source, the selected catalog and the locale directory under
+`[reading-log i18n]`. Missing or broken catalogs also log the fallback reason.
+
 The translation layer is private to Reading Log. It does not change KOReader's
 or Bookshelf's gettext domain or the system locale. No additional package,
 network connection or compilation step is required on the reader.

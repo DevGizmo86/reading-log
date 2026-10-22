@@ -41,6 +41,60 @@ eq(dofile(root .. "i18n.lua").gettext("Close"), "Close")
 G_reader_settings = {readSetting = function() return false end}
 eq(dofile(root .. "i18n.lua").gettext("Close"), "Close")
 
+-- KOReader's active gettext locale can differ from (or exist without) the
+-- saved setting. Reading Log must follow the language visible in the UI.
+local active_language
+package.preload.gettext = function() return {current_lang = active_language} end
+for _, saved in ipairs{ "", "en", "it_IT" } do
+    active_language = "it_IT"
+    package.loaded.gettext = nil
+    local active = locale(saved)
+    eq(active.gettext("Continue reading"), "Continua a leggere")
+    eq(active.language, "it")
+    eq(active.language_source, "gettext")
+    eq(active.requested_language, "it_IT")
+end
+active_language = "C"
+package.loaded.gettext = nil
+eq(locale("it_IT").gettext("Close"), "Close")
+active_language = ""
+package.loaded.gettext = nil
+eq(locale("it_IT").gettext("Close"), "Chiudi")
+active_language = "it_IT"
+package.loaded.gettext = nil
+G_reader_settings = nil
+eq(dofile(root .. "i18n.lua").gettext("Close"), "Chiudi")
+package.preload.gettext = nil
+package.loaded.gettext = nil
+
+-- A catalog that exists but cannot be parsed/executed used to disappear
+-- silently. Keep a safe fallback and enough diagnostics to identify the cause.
+local original_loadfile = loadfile
+local logs = {}
+package.preload.logger = function()
+    return {info = function(message) logs[#logs + 1] = message end,
+        warn = function(message) logs[#logs + 1] = message end}
+end
+for _, failure in ipairs{ "syntax", "runtime", "not a table" } do
+    loadfile = function(path)
+        if path == root .. "locales/it.lua" then
+            if failure == "syntax" then return nil, "invalid Italian syntax" end
+            if failure == "runtime" then return function() error("invalid Italian runtime") end end
+            return function() return false end
+        end
+        return original_loadfile(path)
+    end
+    logs = {}
+    local fallback = locale("it_IT")
+    eq(fallback.gettext("Close"), "Close")
+    eq(fallback.language, "en")
+    assert(logs[1]:find("requested=it_IT source=settings catalog=en", 1, true))
+    assert(logs[2]:find("English fallback:", 1, true))
+end
+loadfile = original_loadfile
+package.preload.logger = nil
+package.loaded.logger = nil
+
 -- Unsupported locales keep Bookshelf's existing localized dates. A catalog
 -- we own must not be relocalized by the host a second time.
 package.preload["lib/bookshelf_localdate"] = function()
